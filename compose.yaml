@@ -1,0 +1,11 @@
+services:
+  api:
+    build:
+      context: .
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    ports:
+      - "127.0.0.1:8001:8001"
+    env_file:
+      - .env
