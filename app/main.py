@@ -146,7 +146,12 @@ class RandomMatchManager:
     async def _safe_send(self, websocket: WebSocket, payload: dict[str, Any]) -> bool:
         try:
             await websocket.send_json(payload)
-        except Exception:
+        except Exception as exc:
+            logger.warning(
+                "websocket send_json failed: %s: %s",
+                type(exc).__name__,
+                exc,
+            )
             return False
         return True
 
@@ -336,16 +341,23 @@ class RandomMatchManager:
         outbound["from"] = from_client_id
         delivered = await self._safe_send(target_ws, outbound)
         if not delivered:
+            signal_type = str(payload.get("type", "")).strip()
             logger.warning(
                 "random_match relay send failed signal_type=%s",
-                str(payload.get("type", "")),
+                signal_type,
             )
-            await self.send_to(
-                from_client_id,
-                {"type": "error", "message": "Собеседник недоступен. Ищем нового..."},
-            )
-            await self.leave_call(from_client_id)
-            await self.mark_ready(from_client_id)
+            # Offer/answer must be delivered; dropping ICE is painful but one bad
+            # candidate should not tear down the whole session (regression vs silent drop).
+            if signal_type != "ice_candidate":
+                await self.send_to(
+                    from_client_id,
+                    {
+                        "type": "error",
+                        "message": "Собеседник недоступен. Ищем нового...",
+                    },
+                )
+                await self.leave_call(from_client_id)
+                await self.mark_ready(from_client_id)
 
 
 direct_manager = ConnectionManager()
