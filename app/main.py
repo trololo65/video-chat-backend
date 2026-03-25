@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import random
 import uuid
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -206,6 +209,7 @@ class RandomMatchManager:
         first_payload: tuple[WebSocket, dict[str, Any]] | None = None
         second_payload: tuple[WebSocket, dict[str, Any]] | None = None
         searching_ws: WebSocket | None = None
+        matched_peer_id: str | None = None
 
         async with self.lock:
             if client_id not in self.connections:
@@ -251,6 +255,7 @@ class RandomMatchManager:
                         self.waiting_queue.append(partner_id)
                     self._cleanup_waiting_queue()
                 else:
+                    matched_peer_id = partner_id
                     first_payload = (
                         client_ws,
                         {
@@ -272,10 +277,31 @@ class RandomMatchManager:
                         },
                     )
 
-        if first_payload:
-            await self._safe_send(first_payload[0], first_payload[1])
-        if second_payload:
-            await self._safe_send(second_payload[0], second_payload[1])
+        if first_payload and second_payload and matched_peer_id is not None:
+            ok_first = await self._safe_send(first_payload[0], first_payload[1])
+            ok_second = await self._safe_send(second_payload[0], second_payload[1])
+            if not (ok_first and ok_second):
+                logger.warning(
+                    "random_match matched delivery failed ok_first=%s ok_second=%s",
+                    ok_first,
+                    ok_second,
+                )
+                partner_id = matched_peer_id
+                async with self.lock:
+                    self.partner_by_client.pop(client_id, None)
+                    self.partner_by_client.pop(partner_id, None)
+                    for cid in (client_id, partner_id):
+                        if cid in self.connections and cid not in self.waiting_queue:
+                            self.waiting_queue.append(cid)
+                    self._cleanup_waiting_queue()
+                await self.send_to(
+                    client_id,
+                    {"type": "peer_left", "from": partner_id},
+                )
+                await self.send_to(
+                    partner_id,
+                    {"type": "peer_left", "from": client_id},
+                )
 
         if searching_ws:
             await self._safe_send(
@@ -308,7 +334,18 @@ class RandomMatchManager:
         outbound = dict(payload)
         outbound.pop("to", None)
         outbound["from"] = from_client_id
-        await self._safe_send(target_ws, outbound)
+        delivered = await self._safe_send(target_ws, outbound)
+        if not delivered:
+            logger.warning(
+                "random_match relay send failed signal_type=%s",
+                str(payload.get("type", "")),
+            )
+            await self.send_to(
+                from_client_id,
+                {"type": "error", "message": "Собеседник недоступен. Ищем нового..."},
+            )
+            await self.leave_call(from_client_id)
+            await self.mark_ready(from_client_id)
 
 
 direct_manager = ConnectionManager()
