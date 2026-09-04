@@ -22,6 +22,10 @@ class User(BaseModel):
     avatar: str
 
 
+class OnlineCountResponse(BaseModel):
+    online: int
+
+
 class SignalEnvelope(BaseModel):
     type: str
     from_client: str = Field(alias="from")
@@ -154,6 +158,10 @@ class RandomMatchManager:
             )
             return False
         return True
+
+    async def snapshot_online(self) -> int:
+        async with self.lock:
+            return len(self.connections)
 
     async def send_to(self, client_id: str, payload: dict[str, Any]) -> bool:
         async with self.lock:
@@ -377,6 +385,12 @@ app.add_middleware(
 @app.get("/api/health")
 async def healthcheck() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/online", response_model=OnlineCountResponse)
+@app.get("/api/online", response_model=OnlineCountResponse)
+async def get_online() -> OnlineCountResponse:
+    return OnlineCountResponse(online=await random_match_manager.snapshot_online())
 
 
 @app.get("/api/users", response_model=list[User])
